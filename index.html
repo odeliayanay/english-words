@@ -28,6 +28,7 @@
   --shadow:0 2px 0 rgba(0,0,0,.25),0 8px 24px rgba(0,0,0,.3); color-scheme:dark}
 
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--body);font-size:17px;line-height:1.5;
   padding-block:20px 48px;padding-inline:16px}
 .wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
@@ -112,6 +113,11 @@ select{font:600 15px var(--body);color:var(--ink);background:var(--sheet);border
 .tile{width:48px;height:52px;border-radius:12px;border:2px solid var(--ink);background:var(--hl);color:var(--ink);font:600 28px var(--display);cursor:pointer;box-shadow:0 3px 0 var(--ink)}
 .tile:disabled{visibility:hidden}
 
+.pattern{display:flex;gap:6px;justify-content:center;margin:-4px 0 12px;font:600 28px var(--display)}
+.pattern span{min-width:26px;text-align:center;color:var(--line)}
+.pattern span.on{color:var(--ink);background:var(--hl);border-radius:6px}
+.penwrap{display:flex;flex-direction:column;gap:8px;align-items:center;width:100%}
+.pad{width:min(560px,100%);height:170px;background:var(--sheet);border:3px dashed var(--line);border-radius:16px;touch-action:none;cursor:crosshair}
 /* summary */
 .summary{text-align:center;display:flex;flex-direction:column;gap:12px;align-items:center}
 .score{font:700 56px var(--display);font-variant-numeric:tabular-nums}
@@ -204,24 +210,37 @@ td.nc{color:var(--ink-soft);font-variant-numeric:tabular-nums;width:32px}
         <label for="dCount">כמה מילים:
           <select id="dCount"><option value="10">10</option><option value="15">15</option><option value="26">כל ה־26</option></select>
         </label>
+        <label for="dAnswer">איך לענות:
+          <select id="dAnswer"><option value="type">מקלדת ⌨️</option><option value="pen">כתיבה בעט / באצבע ✍️</option></select>
+        </label>
         <label for="dSet">מתוך:
           <select id="dSet"><option value="all">כל המילים</option><option value="todo">מה שעוד לא יודעת</option><option value="miss">מילים שטעיתי בהן</option></select>
         </label>
       </div>
       <div class="summary">
         <div class="pic">📝</div>
-        <p style="margin:0;max-width:44ch">שומעים מילה, כותבים אותה באנגלית ובודקים. אם טעית, רואים בדיוק איזו אות.</p>
+        <p style="margin:0;max-width:44ch">שומעים מילה, כותבים אותה באנגלית (במקלדת או בעט על המסך) ומקבלים ציון. אפשר לבקש רמז או לגלות אותיות.</p>
         <button class="btn primary" id="dStart" type="button">מתחילים הכתבה</button>
       </div>
     </div>
     <div id="dRun" hidden>
       <div class="meter" id="dMeter"></div>
       <div class="prompt" id="dPrompt"></div>
+      <div class="pattern" id="dPattern" dir="ltr" hidden></div>
       <form id="dForm" class="row" style="flex-direction:column;align-items:center">
         <input id="dInput" class="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="כתבי כאן באנגלית" dir="ltr">
+        <div id="dPen" class="penwrap" hidden>
+          <canvas id="dCanvas" class="pad" aria-label="משטח כתיבה בעט"></canvas>
+          <div class="row">
+            <button class="btn small" id="dUndo" type="button">↶ בטלי קו</button>
+            <button class="btn small" id="dClear" type="button">🧽 נקי הכל</button>
+          </div>
+          <div class="hint" id="dOcrState"></div>
+        </div>
         <div class="row" style="margin-top:14px">
           <button class="btn primary" id="dCheck" type="submit">בדיקה ✓</button>
           <button class="btn small" id="dHint" type="button">💡 רמז</button>
+          <button class="btn small" id="dReveal" type="button">🔍 גלי אות</button>
         </div>
       </form>
       <div class="feedback" id="dFeed" aria-live="polite"></div>
@@ -355,61 +374,129 @@ $("cDir").onchange=renderCard;$("cSet").onchange=buildDeck;
 // ---------- dictation ----------
 let dict=null;
 function meter(el,st){el.innerHTML=st.items.map((_,i)=>`<i class="${st.res[i]===true?"ok":st.res[i]===false?"bad":i===st.i?"now":""}"></i>`).join("")}
+function lev(a,b){const m=a.length,n=b.length;if(!m)return n;if(!n)return m;let p=[...Array(n+1).keys()];
+  for(let i=1;i<=m;i++){const c=[i];for(let j=1;j<=n;j++)c[j]=Math.min(p[j]+1,c[j-1]+1,p[j-1]+(a[i-1]===b[j-1]?0:1));p=c}return p[n]}
+const sim=(a,b)=>Math.max(0,1-lev(a,b)/Math.max(a.length,b.length,1));
+
+// --- pen pad ---
+const pad={strokes:[],cur:null,cv:null,ctx:null};
+function padSize(){const cv=$("dCanvas"),r=cv.getBoundingClientRect(),d=window.devicePixelRatio||1;
+  if(!r.width)return;cv.width=Math.round(r.width*d);cv.height=Math.round(r.height*d);pad.ctx=cv.getContext("2d");pad.ctx.setTransform(d,0,0,d,0,0);padDraw()}
+function padInk(){return getComputedStyle(document.documentElement).getPropertyValue("--ink").trim()||"#1D3478"}
+function padDraw(){const c=pad.ctx,cv=$("dCanvas");if(!c)return;const w=cv.getBoundingClientRect().width,h=cv.getBoundingClientRect().height;
+  c.clearRect(0,0,w,h);c.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue("--rule").trim();c.lineWidth=1;
+  [0.3,0.72].forEach(f=>{c.beginPath();c.moveTo(12,h*f);c.lineTo(w-12,h*f);c.stroke()});
+  c.strokeStyle=padInk();c.lineWidth=4;c.lineCap="round";c.lineJoin="round";
+  for(const s of pad.strokes){c.beginPath();s.forEach((p,i)=>i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]));if(s.length===1)c.lineTo(s[0][0]+.1,s[0][1]);c.stroke()}}
+(function(){const cv=$("dCanvas");const pt=e=>{const r=cv.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top]};
+  cv.addEventListener("pointerdown",e=>{if($("dInput").disabled)return;e.preventDefault();cv.setPointerCapture(e.pointerId);pad.cur=[pt(e)];pad.strokes.push(pad.cur);padDraw()});
+  cv.addEventListener("pointermove",e=>{if(!pad.cur)return;e.preventDefault();pad.cur.push(pt(e));padDraw()});
+  const up=()=>{pad.cur=null};cv.addEventListener("pointerup",up);cv.addEventListener("pointercancel",up);
+  window.addEventListener("resize",()=>{if(!$("dPen").hidden)padSize()});
+  $("dUndo").onclick=()=>{pad.strokes.pop();padDraw()};$("dClear").onclick=()=>{pad.strokes=[];padDraw()};})();
+function padImage(){ // crop strokes, redraw thick black on white for OCR
+  const pts=pad.strokes.flat();if(!pts.length)return null;
+  let x0=Math.min(...pts.map(p=>p[0])),x1=Math.max(...pts.map(p=>p[0])),y0=Math.min(...pts.map(p=>p[1])),y1=Math.max(...pts.map(p=>p[1]));
+  const bw=Math.max(x1-x0,20),bh=Math.max(y1-y0,20),sc=Math.min(4,110/bh),pd=40;
+  const o=document.createElement("canvas");o.width=Math.round(bw*sc+pd*2);o.height=Math.round(bh*sc+pd*2);
+  const c=o.getContext("2d");c.fillStyle="#fff";c.fillRect(0,0,o.width,o.height);c.strokeStyle="#000";c.lineWidth=Math.max(6,5*sc);c.lineCap="round";c.lineJoin="round";
+  for(const s of pad.strokes){c.beginPath();s.forEach((p,i)=>{const X=(p[0]-x0)*sc+pd,Y=(p[1]-y0)*sc+pd;i?c.lineTo(X,Y):c.moveTo(X,Y)});if(s.length===1)c.lineTo((s[0][0]-x0)*sc+pd+.1,(s[0][1]-y0)*sc+pd);c.stroke()}
+  return o;
+}
+// --- handwriting recognition (Tesseract.js, loaded on first use) ---
+let ocrP=null;
+function loadScript(src){return new Promise((res,rej)=>{const t=document.createElement("script");t.src=src;t.onload=res;t.onerror=rej;document.head.appendChild(t)})}
+function getOCR(){if(ocrP)return ocrP;
+  ocrP=(async()=>{if(!window.Tesseract)await loadScript("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js");
+    const w=await Tesseract.createWorker("eng");
+    await w.setParameters({tessedit_char_whitelist:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",tessedit_pageseg_mode:"8"});return w})();
+  ocrP.catch(()=>{ocrP=null});return ocrP}
+async function readPen(){const img=padImage();if(!img)return"";
+  const w=await getOCR();const r=await w.recognize(img);return (r.data.text||"").replace(/[^a-zA-Z]/g,"").toLowerCase()}
+
 $("dStart").onclick=()=>{
   const n=+$("dCount").value;const items=shuffle(pool($("dSet").value)).slice(0,n);
-  dict={items,i:0,res:[],tries:0,mode:$("dMode").value,wrong:[]};
-  $("dSetup").hidden=true;$("dDone").hidden=true;$("dRun").hidden=false;showDict();
+  dict={items,i:0,res:[],scores:[],helped:0,tries:0,mode:$("dMode").value,pen:$("dAnswer").value==="pen",wrong:[]};
+  $("dSetup").hidden=true;$("dDone").hidden=true;$("dRun").hidden=false;
+  $("dInput").hidden=dict.pen;$("dPen").hidden=!dict.pen;
+  if(dict.pen){padSize();$("dOcrState").textContent="טוענת את זיהוי כתב היד…";
+    getOCR().then(()=>$("dOcrState").textContent="כתבי את המילה באותיות ברורות, על הקווים")
+      .catch(()=>$("dOcrState").textContent="זיהוי כתב היד לא נטען כאן. אפשר לעבור לכתיבה במקלדת, או לפתוח את האתר.")}
+  showDict();
 };
+function renderPattern(){const w=dict.items[dict.i],el=$("dPattern");
+  if(!dict.rev&&!dict.showLen){el.hidden=true;return}
+  el.hidden=false;el.innerHTML=w.en.split("").map((c,i)=>`<span class="${i<dict.rev?"on":""}">${i<dict.rev?esc(c):"_"}</span>`).join("")}
 function showDict(){
-  const w=dict.items[dict.i];dict.tries=0;dict.hint=false;
+  const w=dict.items[dict.i];dict.tries=0;dict.hintLvl=0;dict.rev=0;dict.showLen=false;
   meter($("dMeter"),dict);
-  const audio=dict.mode==="audio"&&canSpeak();
+  const audio=dict.mode==="audio";
   $("dPrompt").innerHTML=(audio
     ?`<button class="bigspeak" type="button" id="dPlay" aria-label="השמעה">🔊</button><div class="row"><button class="btn small" type="button" id="dSlow">🐢 לאט</button></div><div id="dHe" class="hint" hidden><span class="pic" style="font-size:40px">${w.p}</span> ${esc(w.he)}</div>`
-    :`<span class="pic">${w.p}</span><span class="he">${esc(w.he)}</span>`)
+    :`<span class="pic">${w.p}</span><span class="he">${esc(w.he)}</span><button class="speak" type="button" id="dPlay" aria-label="השמעה" hidden>🔊</button>`)
     +`<span class="hint">מילה ${dict.i+1} מתוך ${dict.items.length}</span>`;
-  if(audio){$("dPlay").onclick=()=>{say(w.en);$("dInput").focus()};$("dSlow").onclick=()=>{say(w.en,0.5);$("dInput").focus()};setTimeout(()=>say(w.en),250)}
-  $("dInput").value="";$("dInput").disabled=false;$("dFeed").innerHTML="";$("dCheck").textContent="בדיקה ✓";$("dHint").hidden=false;
-  $("dInput").focus();
+  $("dPlay").onclick=()=>{say(w.en);focusAns()};if(audio){$("dSlow").onclick=()=>{say(w.en,0.5);focusAns()};setTimeout(()=>say(w.en),250)}
+  $("dInput").value="";$("dInput").disabled=false;$("dFeed").innerHTML="";$("dCheck").textContent="בדיקה ✓";$("dCheck").disabled=false;
+  $("dHint").hidden=false;$("dReveal").hidden=false;$("dReveal").disabled=false;pad.strokes=[];padDraw();renderPattern();focusAns();
 }
+function focusAns(){if(!dict.pen)$("dInput").focus()}
 function diffHTML(ans,correct){
   let out="";for(let i=0;i<correct.length;i++){out+=`<span class="${ans[i]===correct[i]?"r":"w"}">${esc(correct[i])}</span>`}
   return `<div class="letters">${out}</div>`;
 }
-$("dHint").onclick=()=>{const w=dict.items[dict.i];
-  const he=$("dHe");if(he&&he.hidden){he.hidden=false;return}
-  dict.hint=true;$("dFeed").innerHTML=`<span class="hint">מתחילה ב־<b dir="ltr">${esc(w.en[0])}</b> · ${w.en.length} אותיות</span>`;$("dInput").focus()};
-$("dForm").addEventListener("submit",e=>{e.preventDefault();
+$("dHint").onclick=()=>{const w=dict.items[dict.i];dict.hintLvl++;
+  if(dict.hintLvl===1){ if(dict.mode==="audio"){$("dHe").hidden=false}else{$("dPlay").hidden=false;say(w.en)}
+    $("dFeed").innerHTML=`<span class="hint">${dict.mode==="audio"?"זה הפירוש בעברית":"אפשר לשמוע את המילה 🔊"}</span>`}
+  else if(dict.hintLvl===2){dict.showLen=true;renderPattern();$("dFeed").innerHTML=`<span class="hint">במילה יש ${w.en.length} אותיות</span>`}
+  else{$("dFeed").innerHTML=`<span class="hint">עוד עזרה? לחצי "גלי אות" כמה פעמים שצריך</span>`}
+  focusAns()};
+$("dReveal").onclick=()=>{const w=dict.items[dict.i];if(dict.rev<w.en.length)dict.rev++;renderPattern();
+  if(!dict.pen){const v=$("dInput").value;if(!w.en.startsWith(v.toLowerCase())||v.length<dict.rev)$("dInput").value=w.en.slice(0,dict.rev)}
+  $("dFeed").innerHTML=`<span class="hint">גילית ${dict.rev} מתוך ${w.en.length} אותיות</span>`;
+  if(dict.rev>=w.en.length)$("dReveal").disabled=true;focusAns()};
+function wordScore(s){const w=dict.items[dict.i];let v=s-0.6*dict.rev/w.en.length;if(dict.tries>0)v*=0.8;return Math.max(0,Math.round(v*100))}
+$("dForm").addEventListener("submit",async e=>{e.preventDefault();
   if(!dict)return;
   if($("dInput").disabled){next();return}
-  const w=dict.items[dict.i],ans=$("dInput").value.trim().toLowerCase();
-  if(!ans){$("dInput").focus();return}
-  if(ans===w.en){
-    if(dict.res[dict.i]===undefined)dict.res[dict.i]=true;
-    $("dFeed").innerHTML=`<div class="good">${pick(["מעולה! 🎉","בדיוק! ⭐","כל הכבוד! 👏","צדקת! 💪"])}</div>${diffHTML(w.en,w.en)}`;
-    lock();
-  }else{
+  const w=dict.items[dict.i];let ans;
+  if(dict.pen){if(!pad.strokes.length){$("dFeed").innerHTML=`<span class="hint">כתבי קודם את המילה בעט ✍️</span>`;return}
+    $("dCheck").disabled=true;$("dFeed").innerHTML=`<span class="hint">קוראת את כתב היד…</span>`;
+    try{ans=await readPen()}catch(err){$("dCheck").disabled=false;$("dFeed").innerHTML=`<div class="oops">זיהוי כתב היד לא נטען. בדקי חיבור לאינטרנט, או עברי לכתיבה במקלדת.</div>`;return}
+    $("dCheck").disabled=false}
+  else{ans=$("dInput").value.trim().toLowerCase();if(!ans){$("dInput").focus();return}}
+  const read=dict.pen?`<div class="hint">המערכת קראה: <b dir="ltr">${esc(ans||"?")}</b></div>`:"";
+  if(ans===w.en){ good(1,read) }
+  else{
     dict.tries++;
-    if(dict.tries<2){$("dFeed").innerHTML=`<div class="oops">כמעט… נסי עוד פעם 🙂</div><div class="hint">מספר אותיות: ${w.en.length}</div>`;$("dInput").select()}
-    else{dict.res[dict.i]=false;dict.wrong.push(w);addMiss(w.id);
-      $("dFeed").innerHTML=`<div class="oops">כתבת: <span dir="ltr">${esc(ans)}</span> · התשובה:</div>${diffHTML(ans,w.en)}`;say(w.en);lock()}
+    if(dict.tries<2){$("dFeed").innerHTML=`${read}<div class="oops">כמעט… נסי עוד פעם 🙂</div>${dict.pen?`<button class="btn small" type="button" id="dFix">המערכת טעתה, כתבתי נכון</button>`:""}`;
+      if(dict.pen)$("dFix").onclick=()=>{dict.tries--;good(1,"")};else $("dInput").select();
+      if(dict.pen){pad.strokes=[];padDraw()}}
+    else{const s=sim(ans,w.en),sc=wordScore(s);dict.res[dict.i]=false;dict.scores[dict.i]=sc;dict.wrong.push(w);addMiss(w.id);
+      $("dFeed").innerHTML=`${read}<div class="oops">${dict.pen?"":`כתבת: <span dir="ltr">${esc(ans)}</span> · `}התשובה:</div>${diffHTML(ans,w.en)}<div class="hint">ציון למילה: ${sc}</div>${dict.pen?`<button class="btn small" type="button" id="dFix">המערכת טעתה, כתבתי נכון</button>`:""}`;
+      if(dict.pen)$("dFix").onclick=()=>{dict.wrong.pop();delete misses[w.id];save();good(1,"",true)};
+      say(w.en);lock()}
   }
   meter($("dMeter"),dict);
 });
-function lock(){$("dInput").disabled=true;$("dHint").hidden=true;$("dCheck").textContent=dict.i+1<dict.items.length?"למילה הבאה ←":"לסיכום ←";$("dCheck").focus()}
+function good(s,read,fromLock){const w=dict.items[dict.i];dict.res[dict.i]=true;const sc=wordScore(s);dict.scores[dict.i]=sc;if(dict.rev)dict.helped++;
+  $("dFeed").innerHTML=`${read}<div class="good">${pick(["מעולה! 🎉","בדיוק! ⭐","כל הכבוד! 👏","צדקת! 💪"])}</div>${diffHTML(w.en,w.en)}<div class="hint">ציון למילה: ${sc}${dict.rev?` · נעזרת ב־${dict.rev} אותיות`:""}</div>`;
+  if(!fromLock)lock();meter($("dMeter"),dict)}
+function lock(){$("dInput").disabled=true;$("dHint").hidden=true;$("dReveal").hidden=true;$("dCheck").textContent=dict.i+1<dict.items.length?"למילה הבאה ←":"לסיכום ←";$("dCheck").focus()}
 function next(){dict.i++;if(dict.i<dict.items.length)showDict();else finishDict()}
 const pick=a=>a[Math.floor(Math.random()*a.length)];
 function stars(p){return p>=0.9?"⭐⭐⭐":p>=0.6?"⭐⭐☆":p>0?"⭐☆☆":"☆☆☆"}
 function finishDict(){
   const ok=dict.res.filter(x=>x===true).length,n=dict.items.length;
-  dict.items.forEach((w,i)=>{if(dict.res[i]===true&&!misses[w.id])known.add(w.id)});save();
+  const grade=Math.round(dict.scores.reduce((a,b)=>a+(b||0),0)/n);
+  dict.items.forEach((w,i)=>{if(dict.res[i]===true&&!misses[w.id]&&(dict.scores[i]||0)>=100)known.add(w.id)});save();
   $("dRun").hidden=true;const d=$("dDone");d.hidden=false;
-  d.innerHTML=`<div class="stars">${stars(ok/n)}</div><div class="score">${ok}/${n}</div>
-   <p style="margin:0">${ok===n?"הכתבה מושלמת! 🏆":ok/n>=0.7?"עבודה יפה מאוד!":"ממשיכים לתרגל, זה משתפר כל פעם."}</p>
+  d.innerHTML=`<div class="stars">${stars(grade/100)}</div><div class="score">${grade}</div><div class="hint" style="margin:0">ציון מתוך 100</div>
+   <p style="margin:0">${ok} מתוך ${n} מילים נכונות${dict.helped?` · ב־${dict.helped} מילים נעזרת בגילוי אותיות`:""}</p>
+   <p style="margin:0">${grade>=95?"הכתבה מושלמת! 🏆":grade>=70?"עבודה יפה מאוד!":"ממשיכים לתרגל, זה משתפר כל פעם."}</p>
    ${dict.wrong.length?`<div><div class="hint" style="margin-bottom:6px">מילים לחזור עליהן:</div><div class="misslist">${dict.wrong.map(w=>`<span class="chip"><b>${esc(w.en)}</b> · ${esc(w.he)}</span>`).join("")}</div></div>`:""}
    <div class="row">${dict.wrong.length?`<button class="btn primary" id="dRetry" type="button">תרגול חוזר רק על הטעויות</button>`:""}
    <button class="btn" id="dAgain" type="button">הכתבה חדשה</button></div>`;
-  if(dict.wrong.length)$("dRetry").onclick=()=>{dict={items:shuffle(dict.wrong),i:0,res:[],tries:0,mode:dict.mode,wrong:[]};d.hidden=true;$("dRun").hidden=false;showDict()};
+  if(dict.wrong.length)$("dRetry").onclick=()=>{dict={...dict,items:shuffle(dict.wrong),i:0,res:[],scores:[],helped:0,tries:0,wrong:[]};d.hidden=true;$("dRun").hidden=false;showDict()};
   $("dAgain").onclick=()=>{d.hidden=true;$("dSetup").hidden=false};
 }
 
