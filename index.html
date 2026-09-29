@@ -130,6 +130,7 @@ td.nc{color:var(--ink-soft);font-variant-numeric:tabular-nums;width:32px}
 .hideen td.enc span{filter:blur(8px);user-select:none}
 .tbl{overflow-x:auto}
 .st{font-size:14px;font-weight:700}
+.badge{display:inline-block;min-width:22px;padding:0 6px;border-radius:99px;background:var(--bad);color:#fff;font-size:13px;line-height:20px;text-align:center;font-variant-numeric:tabular-nums}
 .st.k{color:var(--ok)} .st.m{color:var(--bad)}
 
 @media (max-width:480px){
@@ -160,6 +161,7 @@ td.nc{color:var(--ink-soft);font-variant-numeric:tabular-nums;width:32px}
     <button role="tab" data-tab="dict" aria-selected="false">✍️ הכתבה</button>
     <button role="tab" data-tab="quiz" aria-selected="false">❓ חידון</button>
     <button role="tab" data-tab="scr" aria-selected="false">🔤 סדרי אותיות</button>
+    <button role="tab" data-tab="mist" aria-selected="false">🎯 מבחן הטעויות <span class="badge" id="mBadge" hidden></span></button>
     <button role="tab" data-tab="list" aria-selected="false">📋 רשימת מילים</button>
   </nav>
 
@@ -237,6 +239,20 @@ td.nc{color:var(--ink-soft);font-variant-numeric:tabular-nums;width:32px}
     <div id="sRun"></div>
   </section>
 
+  <!-- MISTAKES TEST -->
+  <section class="page" id="tab-mist" hidden>
+    <div id="mHome"></div>
+    <div id="mRun" hidden>
+      <div class="meter" id="mMeter"></div>
+      <div class="prompt" id="mPrompt"></div>
+      <form id="mForm" class="row" style="flex-direction:column;align-items:center">
+        <input id="mInput" class="answer" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="כתבי כאן באנגלית" dir="ltr">
+        <div class="row" style="margin-top:14px"><button class="btn primary" id="mCheck" type="submit">בדיקה ✓</button></div>
+      </form>
+      <div class="feedback" id="mFeed" aria-live="polite"></div>
+    </div>
+  </section>
+
   <!-- LIST -->
   <section class="page" id="tab-list" hidden>
     <div class="toolbar">
@@ -270,7 +286,8 @@ const store={get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v)
              set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 let known=new Set(store.get("vk_known",[]));
 let misses=store.get("vk_miss",{}); // id -> count
-function save(){store.set("vk_known",[...known]);store.set("vk_miss",misses);renderProgress();renderList()}
+function save(){store.set("vk_known",[...known]);store.set("vk_miss",misses);renderProgress();renderList();renderBadge()}
+function renderBadge(){const n=Object.keys(misses).length,b=document.getElementById("mBadge");if(b){b.hidden=!n;b.textContent=n}}
 function markKnown(id,yes){yes?known.add(id):known.delete(id);save()}
 function addMiss(id){misses[id]=(misses[id]||0)+1;save()}
 function renderProgress(){document.getElementById("knownNum").textContent=known.size;
@@ -305,6 +322,7 @@ $("tabs").addEventListener("click",e=>{const b=e.target.closest("button[data-tab
   document.querySelectorAll("section.page").forEach(s=>s.hidden=s.id!=="tab-"+b.dataset.tab);
   if(b.dataset.tab==="quiz"&&!quiz)startQuiz();
   if(b.dataset.tab==="scr"&&!scr)startScr();
+  if(b.dataset.tab==="mist"&&!(mt&&!$("mRun").hidden))renderMistHome();
   try{if(current)current.pause()}catch(e){}
 });
 
@@ -449,7 +467,7 @@ function showS(){
         $("sFeed").innerHTML=`<div class="good">${pick(["מעולה! 🎉","בדיוק! ⭐","כל הכבוד! 👏"])}</div><div class="row" style="margin-top:10px"><button class="btn primary" type="button" id="sNext">${scr.i+1<scr.items.length?"הבאה ←":"לסיכום ←"}</button></div>`;
         $("sBack").disabled=true;meter($("sMeter"),scr);$("sNext").focus();
         $("sNext").onclick=()=>{scr.i++;scr.i<scr.items.length?showS():endS()};
-      }else{scr.res[scr.i]=false;$("sFeed").innerHTML=`<div class="oops">לא בדיוק, נסי לסדר מחדש 🙂</div>`;
+      }else{if(scr.res[scr.i]===undefined)addMiss(w.id);scr.res[scr.i]=false;$("sFeed").innerHTML=`<div class="oops">לא בדיוק, נסי לסדר מחדש 🙂</div>`;
         setTimeout(()=>{scr.used.forEach(t=>t.disabled=false);scr.built=[];scr.used=[];paint();$("sFeed").innerHTML=""},900)}
     }});
   $("sBack").onclick=()=>{const t=scr.used.pop();if(t){t.disabled=false;scr.built.pop();paint()}};
@@ -459,6 +477,47 @@ function endS(){const ok=scr.res.filter(Boolean).length,n=scr.items.length;
    <p style="margin:0">${ok===n?"סידרת הכל בניסיון הראשון! 🏆":"יפה מאוד!"}</p>
    <button class="btn primary" type="button" id="sAgain">עוד סבב</button></div>`;
   $("sAgain").onclick=startScr}
+
+// ---------- mistakes test ----------
+// every wrong answer anywhere (dictation, quiz, letters) lands in `misses`;
+// here each such word is asked again; a correct answer removes it from the list.
+let mt=null;
+function mistWords(){return WORDS.filter(w=>misses[w.id]).sort((a,b)=>misses[b.id]-misses[a.id])}
+function renderMistHome(){
+  const list=mistWords();$("mRun").hidden=true;const h=$("mHome");h.hidden=false;
+  if(!list.length){h.innerHTML=`<div class="summary"><div class="pic">🏆</div><div class="he" style="font-size:28px">אין טעויות פתוחות!</div>
+    <p style="margin:0;max-width:46ch">כל מילה שתטעי בה בהכתבה, בחידון או בסידור אותיות תיכנס לכאן אוטומטית, והמבחן ייבנה רק ממנה.</p></div>`;return}
+  h.innerHTML=`<div class="summary"><div class="pic">🎯</div>
+    <div class="he" style="font-size:28px">${list.length} מילים לחיזוק</div>
+    <p style="margin:0;max-width:46ch">המבחן בנוי רק מהמילים שטעית בהן. תשובה נכונה מוציאה את המילה מהרשימה, טעות משאירה אותה.</p>
+    <div class="misslist">${list.map(w=>`<span class="chip"><b>${esc(w.en)}</b> · ${esc(w.he)} <span class="st m">×${misses[w.id]}</span></span>`).join("")}</div>
+    <button class="btn primary" id="mStart" type="button">התחילי מבחן טעויות</button></div>`;
+  $("mStart").onclick=startMist;
+}
+function startMist(){mt={items:shuffle(mistWords()),i:0,res:[],fixed:[],still:[]};$("mHome").hidden=true;$("mRun").hidden=false;showMist()}
+function showMist(){
+  const w=mt.items[mt.i];meter($("mMeter"),mt);
+  $("mPrompt").innerHTML=`<span class="pic">${w.p}</span><span class="he">${esc(w.he)}</span>
+    <button class="speak" type="button" id="mSay" aria-label="השמעה">🔊</button>
+    <span class="hint">מילה ${mt.i+1} מתוך ${mt.items.length} · טעית בה ${misses[w.id]} פעמים</span>`;
+  $("mSay").onclick=()=>{say(w.en);$("mInput").focus()};
+  $("mInput").value="";$("mInput").disabled=false;$("mFeed").innerHTML="";$("mCheck").textContent="בדיקה ✓";$("mInput").focus();
+}
+$("mForm").addEventListener("submit",e=>{e.preventDefault();if(!mt)return;
+  if($("mInput").disabled){mt.i++;mt.i<mt.items.length?showMist():endMist();return}
+  const w=mt.items[mt.i],ans=$("mInput").value.trim().toLowerCase();if(!ans)return;
+  if(ans===w.en){mt.res[mt.i]=true;mt.fixed.push(w);delete misses[w.id];save();
+    $("mFeed").innerHTML=`<div class="good">תוקן! המילה יצאה מהרשימה ✨</div>${diffHTML(w.en,w.en)}`;}
+  else{mt.res[mt.i]=false;mt.still.push(w);addMiss(w.id);
+    $("mFeed").innerHTML=`<div class="oops">כתבת: <span dir="ltr">${esc(ans)}</span> · התשובה:</div>${diffHTML(ans,w.en)}`;}
+  say(w.en);$("mInput").disabled=true;$("mCheck").textContent=mt.i+1<mt.items.length?"למילה הבאה ←":"לסיכום ←";meter($("mMeter"),mt);$("mCheck").focus();
+});
+function endMist(){const ok=mt.fixed.length,n=mt.items.length;$("mRun").hidden=true;const h=$("mHome");h.hidden=false;
+  h.innerHTML=`<div class="summary"><div class="stars">${stars(ok/n)}</div><div class="score">${ok}/${n}</div>
+   <p style="margin:0">${ok===n?"תיקנת את כל הטעויות! 🏆":`תיקנת ${ok} מילים. נשארו ${mt.still.length} לחיזוק.`}</p>
+   ${mt.still.length?`<div class="misslist">${mt.still.map(w=>`<span class="chip"><b>${esc(w.en)}</b> · ${esc(w.he)}</span>`).join("")}</div>`:""}
+   <div class="row">${mt.still.length?`<button class="btn primary" type="button" id="mAgain">עוד סבב על מה שנשאר</button>`:""}<button class="btn" type="button" id="mBack">חזרה</button></div></div>`;
+  if(mt.still.length)$("mAgain").onclick=startMist;$("mBack").onclick=renderMistHome;}
 
 // ---------- list ----------
 function renderList(){
@@ -473,7 +532,7 @@ $("lReset").onclick=()=>$("lConfirm").hidden=false;
 $("lResetNo").onclick=()=>$("lConfirm").hidden=true;
 $("lResetYes").onclick=()=>{known=new Set();misses={};save();$("lConfirm").hidden=true;renderCard()};
 
-renderProgress();renderCard();renderList();
+renderProgress();renderCard();renderList();renderBadge();
 </script>
 </body>
 </html>
